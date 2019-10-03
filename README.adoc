@@ -1,0 +1,168 @@
+= file-leak-detector
+
+== WTF is this?
+
+This is a plain and simple leak detector for finding stream (and file descriptor) leaks in a Java application.
+
+
+== Why?
+
+Leaving behind unclosed streams could cause great harm, especially if your application is long-running;
+e.g. a web or application server that is supported to run indefinitely.
+It could make you https://unix.stackexchange.com/questions/462508/process-running-out-of-open-file-handles[run out of file descriptors],
+exhaust your https://developer.adroitlogic.com/features/docs/17.07/file-store-feature.html#file-store-feature-2[file caches (we're big fans!)],
+and in some cases, even https://developer.jboss.org/thread/54761[hang your process entirely].
+
+Once we had been constantly fighting with file leaks in https://as2gateway.com/[our own SaaS AS2 exchange server].
+And this tool, even in its primitive stage, helped us enormously.
+
+
+== How does the leak detector work?
+
+Almost all Java stream classes derive from one of two pairs of base classes:
+
+* `java.io.FileInputStream` and `java.io.FileOutputStream`
+* `java.io.FilterInputStream` and `java.io.FilterOutputStream`
+
+By simply patching these two, we can get a global view of all stream openings and closings in your Java process. Simple.
+
+
+== Patching the stream classes
+
+The most straightforward way - which this project also follows - is to take the source of the core Java classes and insert our custom logic.
+
+In our case we use a timer-driven detector. When the stream is created, it:
+
+* captures the stacktrace of the current thread, which includes all classes and calls that led to the stream opening
+
+* starts a timer that would fire after a predefined interval, printing this info into stdout or stderr
+
+When `close()` is invoked, we cancel the timer (there's effectively no leak now).
+
+If `close()` wasn't invoked within the stipulated time, we can suspect that the stream has leaked;
+in that case the timer would fire automatically, and dump the stream identity (e.g. filename) and opener stacktrace.
+
+Simple.
+
+We can build a JAR with compiled copies of these classes, drop it into our application,
+and sit back and relax while the detector does all the magic.
+
+BUT...
+
+
+== Loading the patched stream classes
+
+This is a bit tricky (and might even be impossible, depending on your Java version).
+
+`java.io` is one of the core Java packages, that gets loaded very early - while the JVM is still getting initialized.
+Because of http://blog.ruwan.org/2012/12/dynamic-hot-swap-environment-inside.html?m=1#proposed_solution[Java's classloading policies],
+there's no way to load our patched class later on and "replace" the originally loaded version.
+
+So we use the https://docs.oracle.com/javase/8/docs/technotes/guides/standards/index.html[endorsed directories]
+mechanism to prioritize our custom JAR over Java's native `rt.jar`.
+When Java
+https://stackoverflow.com/questions/6644440/java-which-of-multiple-resources-on-classpath-jvm-takes[searches the classpath sequentially]
+looking for `java.io.FileInputStream`, it will see our JAR before its own - and load our copy of the class.
+It will https://coderanch.com/t/398654/java/Proving-class-loading-takes-place[not load the same class again],
+so all streams opened in our JVM would go through our patched logic - and our leak detector.
+
+```
+java <params> -Djava.endorsed.dirs=path/to/your/JAR/or/its/containing/dir/ <more params> <classname, or -jar {JAR file}>
+```
+
+If the JAR was loaded successfully, you would see this printed to stdout/stderr about 1 second after the process was started:
+
+```
+LeakDumper [FILES,FILTERS]: 2000ms initial grace, 10000ms min-life
+```
+
+The endorsed directories mechanism was https://www.java.com/en/download/faq/release_changes.xml[deprecated in Java 8u40] and
+https://stackoverflow.com/questions/46419496/how-do-you-replace-endorsed-directory-in-java-9[completely removed in Java 9 onwards];
+but you may be able to adapt
+https://stackoverflow.com/questions/28983922/alternative-for-deprecated-endorsed-standards-override-mechanism-and-extension-m#43812492[modules]
+instead.
+
+
+== Leak dump outputs
+
+If it sees a suspiciously long-living open stream, the detector will dump something like this:
+
+```
+/tmp/prefix1879581817937119981suffix
+id: 2 created: 1570066845396
+
+  java.io.FileInputStream.<init>(FileInputStream.java:45)
+  x.y.Z.loadThatFile(Z.java:36)
+  ...
+  g.h.I.doThat(I.java:15)
+  d.e.F.doThis(F.java:20)
+  a.b.C.main(C.java:10)
+
+
+```
+
+This shows the chain of classes and method calls that led to the stream opening, which is almost always sufficient to identify the culprit.
+
+* `id` is an incremental index - the number of streams monitored so far during this JVM session.
+* `created` is the timestamp when the stream was opened
+
+
+== Leak detect configurations
+
+For convenience, the detector accepts the following parameters as environment variables, falling back to defaults if unspecified:
+
+[cols="m,a,m",options="header"]
+|===
+|variable
+|purpose
+|default
+
+|INITIAL_GRACE
+|initial grace period (ms) to ignore detection, right after JVM startup;
+without this, unnecessary streams (JVM- and framework-level (e.g. Spring) JAR/classloading etc.) may also be captured
+|2000
+
+|MIN_LIFE
+|minimum lifetime (ms) of a stream for it to be considered as a leak, i.e. maximum time allowed for a stream to close normally
+|10000
+
+|DETECT_FILES
+|whether to capture leaks for `FileInputStream` entities
+|true
+
+|DETECT_FILTERS
+|whether to capture leaks for `FilterInputStream` entities
+|true
+
+|DUMP_STREAM
+|to which standard output stream (`stdout`/`stderr`) the diagnostic information should be written
+|stderr
+
+|===
+
+
+== Limitations
+
+* The trick will not work on any JVMs where the class-load endorsing/whitelisting/prioritization is not supported
+
+* The tool may produce false positives if the stream is closed via some means other than `close()`:
+I'm not aware of any "other means" though.
+
+* The tool would warn you, regardless of whether the stream is actually backed by system level resources
+(e.g. in case of mock or in-memory streams/buffers a long-lived stream may not raise an issue).
+
+* In some cases like long-lived TCP sockets, it may be acceptable to have the stream open for prolonged periods of time -
+may not be a major concern because each stream is warned for exactly once.
+
+* If your system or JVM is too busy, the timers may not get fired exactly on-time.
+
+* Under heavy load with high-frequency stream ops, the tool may degrade performance
+(console dumps; several extra objects being created for each opened stream; extra thread scheduling; etc.)
+
+* Finally, worst case, under load, it could hang or crash your JVM entirely.
+
+
+== License
+
+This tool is not licensed; use it at your free will. I would appreciate it if you would mention me
+(and https://www.adroitlogic.com/[my company], which made it all possible) when referring to this tool elsewhere.
