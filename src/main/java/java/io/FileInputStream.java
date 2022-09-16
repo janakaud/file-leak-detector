@@ -1,11 +1,10 @@
 package java.io;
 
+import java.nio.channels.FileChannel;
 import sun.nio.ch.FileChannelImpl;
 
-import java.nio.channels.FileChannel;
-
 /**
- * A shameless copy of {@link FileInputStream} from JDK 8, with the leak-dumping logic in place
+ * A shameless copy of {@link FileInputStream} from JDK 11.0.1, with the leak-dumping logic in place
  */
 public class FileInputStream extends InputStream {
 
@@ -13,12 +12,15 @@ public class FileInputStream extends InputStream {
 
     private final String path;
 
-    private FileChannel channel = null;
+    private volatile FileChannel channel;
 
     private final Object closeLock = new Object();
-    private volatile boolean closed = false;
 
-    private LeakDumper dumper = new LeakDumper();
+    private volatile boolean closed;
+
+    private final Object altFinalizer;
+
+    private final LeakDumper dumper = new LeakDumper();
 
     public FileInputStream(String name) throws FileNotFoundException {
         this(name != null ? new File(name) : null);
@@ -40,6 +42,10 @@ public class FileInputStream extends InputStream {
         fd.attach(this);
         path = name;
         open(name);
+        altFinalizer = getFinalizer(this);
+        if (altFinalizer == null) {
+            FileCleanable.register(fd);       // open set the fd, register the cleanup
+        }
 
         if (LeakDumper.FILES) {
             dumper.start(path);
@@ -56,6 +62,7 @@ public class FileInputStream extends InputStream {
         }
         fd = fdObj;
         path = null;
+        altFinalizer = null;
 
         if (LeakDumper.FILES) {
             dumper.start("<FD>");
@@ -86,11 +93,22 @@ public class FileInputStream extends InputStream {
         return readBytes(b, off, len);
     }
 
-    public native long skip(long n) throws IOException;
+    public long skip(long n) throws IOException {
+        return skip0(n);
+    }
 
-    public native int available() throws IOException;
+    private native long skip0(long n) throws IOException;
+
+    public int available() throws IOException {
+        return available0();
+    }
+
+    private native int available0() throws IOException;
 
     public void close() throws IOException {
+        if (closed) {
+            return;
+        }
         dumper.cancel();
         synchronized (closeLock) {
             if (closed) {
@@ -98,13 +116,15 @@ public class FileInputStream extends InputStream {
             }
             closed = true;
         }
-        if (channel != null) {
-            channel.close();
+
+        FileChannel fc = channel;
+        if (fc != null) {
+            fc.close();
         }
 
         fd.closeAll(new Closeable() {
             public void close() throws IOException {
-                close0();
+                fd.close();
             }
         });
     }
@@ -117,25 +137,67 @@ public class FileInputStream extends InputStream {
     }
 
     public FileChannel getChannel() {
-        synchronized (this) {
-            if (channel == null) {
-                channel = FileChannelImpl.open(fd, path, true, false, this);
+        FileChannel fc = this.channel;
+        if (fc == null) {
+            synchronized (this) {
+                fc = this.channel;
+                if (fc == null) {
+                    this.channel = fc = FileChannelImpl.open(fd, path, true,
+                            false, false, this);
+                    if (closed) {
+                        try {
+                            fc.close();
+                        } catch (IOException ioe) {
+                            throw new InternalError(ioe); // should not happen
+                        }
+                    }
+                }
             }
-            return channel;
         }
+        return fc;
     }
 
     private static native void initIDs();
-
-    private native void close0() throws IOException;
 
     static {
         initIDs();
     }
 
+    @Deprecated
     protected void finalize() throws IOException {
-        if ((fd != null) && (fd != FileDescriptor.in)) {
-            close();
+    }
+
+    private static Object getFinalizer(FileInputStream fis) {
+        Class<?> clazz = fis.getClass();
+        while (clazz != FileInputStream.class) {
+            try {
+                clazz.getDeclaredMethod("close");
+                return new AltFinalizer(fis);
+            } catch (NoSuchMethodException nsme) {
+                // ignore
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return null;
+    }
+
+    static class AltFinalizer {
+        private final FileInputStream fis;
+
+        AltFinalizer(FileInputStream fis) {
+            this.fis = fis;
+        }
+
+        @Override
+        @SuppressWarnings("deprecation")
+        protected final void finalize() {
+            try {
+                if ((fis.fd != null) && (fis.fd != FileDescriptor.in)) {
+                    fis.close();
+                }
+            } catch (IOException ioe) {
+                // ignore
+            }
         }
     }
 }

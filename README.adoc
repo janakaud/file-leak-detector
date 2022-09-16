@@ -4,6 +4,8 @@
 
 This is a plain and simple leak detector for finding stream (and file descriptor) leaks in a Java application.
 
+*NOTE:* Please refer `j8` branch for an older implementation covering Java 8 etc.
+
 
 == Why?
 
@@ -58,16 +60,12 @@ This is a bit tricky (and might even be impossible, depending on your Java versi
 Because of http://blog.ruwan.org/2012/12/dynamic-hot-swap-environment-inside.html?m=1#proposed_solution[Java's classloading policies],
 there's no way to load our patched class later on and "replace" the originally loaded version.
 
-So we use the https://docs.oracle.com/javase/8/docs/technotes/guides/standards/index.html[endorsed directories]
-mechanism to prioritize our custom JAR over Java's native `rt.jar`.
-When Java
-https://stackoverflow.com/questions/6644440/java-which-of-multiple-resources-on-classpath-jvm-takes[searches the classpath sequentially]
-looking for `java.io.FileInputStream`, it will see our JAR before its own - and load our copy of the class.
-It will https://coderanch.com/t/398654/java/Proving-class-loading-takes-place[not load the same class again],
+So we use the https://nipafx.dev/five-command-line-options-hack-java-module-system/#adding-classes-to-modules-with---patch-module[`--patch-module`]
+mechanism to merge our custom classes into Java's native `java.base` module,
 so all streams opened in our JVM would go through our patched logic - and our leak detector.
 
 ```
-java <params> -Djava.endorsed.dirs=path/to/your/JAR/or/its/containing/dir/ <more params> <classname, or -jar {JAR file}>
+java <params> --patch-module java.base=path/to/your/JAR <more params> <classname, or -jar {JAR file}>
 ```
 
 If the JAR was loaded successfully, you would see this printed to stdout/stderr about 1 second after the process was started:
@@ -75,12 +73,6 @@ If the JAR was loaded successfully, you would see this printed to stdout/stderr 
 ```
 LeakDumper [FILES,FILTERS]: 2000ms initial grace, 10000ms min-life
 ```
-
-The endorsed directories mechanism was https://www.java.com/en/download/faq/release_changes.xml[deprecated in Java 8u40] and
-https://stackoverflow.com/questions/46419496/how-do-you-replace-endorsed-directory-in-java-9[completely removed in Java 9 onwards];
-but you may be able to adapt
-https://stackoverflow.com/questions/28983922/alternative-for-deprecated-endorsed-standards-override-mechanism-and-extension-m#43812492[modules]
-instead.
 
 
 == Leak dump outputs

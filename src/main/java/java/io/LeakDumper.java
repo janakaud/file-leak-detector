@@ -1,6 +1,5 @@
 package java.io;
 
-import java.lang.management.ManagementFactory;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -16,6 +15,8 @@ public class LeakDumper {
     static final boolean FILTERS;
 
     private static final Supplier<PrintStream> DUMP_STREAM;
+
+    private static final long BORN_AT = System.currentTimeMillis();     // for uptime; will be inited at first FIS opened in JVM, almost t=0
 
     static {
         // wait time before tracking starts - skips Java-level classloading, may need to be increased in case of Spring etc
@@ -65,7 +66,7 @@ public class LeakDumper {
 
     public void start(String path) {
         // if we're within the initial grace period, don't track this stream
-        if (ManagementFactory.getRuntimeMXBean().getUptime() < GRACE) {
+        if (System.currentTimeMillis() - BORN_AT < GRACE) {
             return;
         }
 

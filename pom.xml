@@ -6,7 +6,7 @@
     <groupId>com.tuna</groupId>
     <artifactId>file-leak-detector</artifactId>
     <packaging>jar</packaging>
-    <version>1.0-SNAPSHOT</version>
+    <version>j9-1.1</version>
 
     <name>Java file leak detector</name>
     <description>Detects and warns about file leaks (files remaining open for long intervals) in your Java application</description>
