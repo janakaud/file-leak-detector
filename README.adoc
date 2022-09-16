@@ -4,6 +4,8 @@
 
 This is a plain and simple leak detector for finding stream (and file descriptor) leaks in a Java application.
 
+*NOTE:* Please refer `master` branch for an implementation covering newer Java versions (9 onwards).
+
 
 == Why?
 
